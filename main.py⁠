@@ -1,0 +1,101 @@
+import os
+import math
+import requests
+import pandas as pd
+import yfinance as yf
+
+# GitHubのSecretsからURLを取得
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+def fetch_data_with_fallback(primary_symbol, fallback_symbol):
+    for symbol in [primary_symbol, fallback_symbol]:
+        if not symbol:
+            continue
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period="60d")
+            if not df.empty and len(df) >= 26:
+                return df, symbol
+        except Exception:
+            continue
+    return pd.DataFrame(), None
+
+def analyze_market_indicators():
+    targets = [
+        {"name": "日経平均株価", "primary": "^N225", "fallback": None},
+        {"name": "TOPIX", "primary": "^TOPX", "fallback": "1306.T"}
+    ]
+    
+    results = []
+    for item in targets:
+        name = item["name"]
+        df, used_symbol = fetch_data_with_fallback(item["primary"], item["fallback"])
+        
+        if df.empty:
+            continue
+            
+        df['SMA25'] = df['Close'].rolling(window=25).mean()
+        
+        today_close = float(df['Close'].iloc[-1])
+        today_sma25 = float(df['SMA25'].iloc[-1])
+        prev_sma25 = float(df['SMA25'].iloc[-2])
+        
+        bias_pct = ((today_close - today_sma25) / today_sma25) * 100
+        slope_pct = ((today_sma25 - prev_sma25) / prev_sma25) * 100
+        angle_deg = math.degrees(math.atan(slope_pct))
+        
+        results.append({
+            'name': name,
+            'close': today_close,
+            'sma25': today_sma25,
+            'bias_pct': bias_pct,
+            'angle_deg': angle_deg
+        })
+            
+    return results
+
+def format_sign_pct(value):
+    if abs(value) < 0.01:
+        return "0%"
+    elif value > 0:
+        return f"+{value:.2f}%"
+    else:
+        return f"{value:.2f}%"
+
+def format_sign_degree(value):
+    if abs(value) < 0.1:
+        return "0度"
+    elif value > 0:
+        return f"+{value:.1f}度"
+    else:
+        return f"{value:.1f}度"
+
+def send_discord_notification(results):
+    if not results or not WEBHOOK_URL:
+        return
+
+    lines = ["📊 **【本日の市場指標：25日線乖離率 ＆ 傾き(角度)】**\n"]
+    
+    for item in results:
+        bias_str = format_sign_pct(item['bias_pct'])
+        degree_str = format_sign_degree(item['angle_deg'])
+        
+        if item['angle_deg'] > 0.1:
+            slope_label = "（上向き）"
+        elif item['angle_deg'] < -0.1:
+            slope_label = "（下向き）"
+        else:
+            slope_label = "（横ばい）"
+            
+        lines.append(f"・**{item['name']}**")
+        lines.append(f"  └ 終値: {item['close']:,.2f}")
+        lines.append(f"  └ 25日線: {item['sma25']:,.2f}")
+        lines.append(f"  └ 25日線乖離率: **{bias_str}**")
+        lines.append(f"  └ 25日線の傾き: **{degree_str}** {slope_label}\n")
+        
+    full_message = "\n".join(lines)
+    requests.post(WEBHOOK_URL, data={"content": full_message})
+
+if __name__ == "__main__":
+    data = analyze_market_indicators()
+    send_discord_notification(data)
